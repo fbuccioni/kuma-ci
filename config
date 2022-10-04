@@ -1,0 +1,4 @@
+# Default for kuma-ci
+
+#port="9000"
+#main_dir="/etc/kuma-ci"

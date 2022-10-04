@@ -1,0 +1,145 @@
+#!/bin/sh
+# Kuma CI by Felipe Buccioni
+
+version="0.1"
+server_name="kuma-ci/${version}"
+nc="$(which nc)"
+jq="$(which jq)"
+port="9000"
+config_dir="/etc/kuma-ci"
+
+while true; do
+    case "${1}" in
+        "-c")
+            shift
+            config_dir="${1}"
+        ;;
+        "-p")
+            shift
+            port="${1}"
+        ;;
+        "-s")
+            shift
+            script_location="${1}"
+        ;;
+    esac
+
+    [ "$#" -eq "0" ] && break
+    shift
+done
+
+http_find_data() {
+    r=$(echo -n $(printf "\34"))
+    n=$(echo -n $(printf "\35"))
+    sep=$(echo -n $(printf "\36"))
+
+    echo "${1}" \
+        | tr '\r\n' "${r}${n}" \
+        | sed -e "s/${r}${n}${r}${n}/${sep}/g" \
+        | cut "-d${sep}" -f2 \
+        | tr "${r}${n}" '\r\n'
+}
+
+nc_listen() {
+    nc -l ${port} -4 <<EOR 2> /dev/null
+HTTP/1.1 200 OK
+Content-type: application/json
+Server: ${server_name}
+Connection: closed
+Content-length: 21
+
+{"message": "Found"}
+EOR
+}
+
+run_script() {
+    script_path="${1}"
+
+    if [ -f "${script_path}" ]; then
+        if [ -x "${script_path}" ]; then
+            "${script_path}"
+        else
+            echo "WARN: Script ${script_path} aren't executable"
+        fi
+    fi
+}
+
+echo "Welcome to kuma pipeline ${version}!"
+echo ""
+
+test -z "${jq}" && \
+    (echo "Cannot find jq binary" >&2 && exit 1)
+
+test -z "${nc}" && \
+    (echo "Cannot find nc binary" >&2 && exit 1)
+
+config_file="${config_dir}/config";
+
+if [ -e "${config_file}" ]; then
+    echo "Using default config file in ${config_file}"
+    . ${config_file}
+fi
+
+[ -z "${script_location}" ] && script_location="${config_dir}/scripts.d"
+
+if [ ! -e "${script_location}" ]; then
+    echo "The scripts dir ${script_location} does not exists, aborting"
+    exit 4
+fi
+
+if [ -d "${script_location}" ]; then
+    script_location_is_directory="yes"
+else
+    script_location_is_directory="no"
+fi
+
+if [ "${script_location_is_directory}" = "yes" ]; then
+    echo "Found directory '${script_location}' with scripts to execute on each request"
+else
+    echo "Found script '${script_location}' to execute on each request"
+fi
+
+echo "Using port ${port}...."
+json_git="$(nc_listen)"
+echo "Server requested"
+
+
+if ! (echo "${json_git}" | cut -c '1-12' | grep "^POST " 2>/dev/null >&2 ); then
+    echo "Failed becquse input aren't POST" >&2
+    exit 2
+fi
+
+if ! (echo "${json_git}" | cut -c '1-256'  | grep -i "content-type:[ ]*application/json" 2>/dev/null >&2); then
+    echo "Failed becquse input aren't 'application/json' type" >&2
+    exit 3
+fi
+
+
+echo "Processing JSON..."
+
+json_git="$(http_find_data "${json_git}")"
+
+export PIPELINE_REPO_NAME="$(echo ${json_git} | "${jq}" '.repository.name')"
+export PIPELINE_REF="$(echo ${json_git} | "${jq}" '.ref')"
+export PIPELINE_PREVIOUS_COMMIT="$(echo ${json_git} | "${jq}" '.before')"
+export PIPELINE_CURRENT_COMMIT="$(echo ${json_git} | "${jq}" '.after')"
+
+for v in \
+    PIPELINE_REPO_NAME \
+    PIPELINE_REF \
+    PIPELINE_PREVIOUS_COMMIT \
+    PIPELINE_CURRENT_COMMIT \
+; do \
+    echo "$v=$(eval "echo \$${v}")"
+done
+
+if [ "${script_location_is_directory}" = "yes" ]; then
+    ls -1 "${script_location}"| sort -f | while read script_file; do
+        run_script "${script_location}/${script_file}"
+    done 
+else
+    run_script "${script_location}"
+fi
+
+echo "Finishing pipeline..."
+echo ""
