@@ -45,7 +45,7 @@ nc_listen() {
 HTTP/1.1 200 OK
 Content-type: application/json
 Server: ${server_name}
-Connection: closed
+Connection: close
 Content-length: 21
 
 {"message": "Found"}
